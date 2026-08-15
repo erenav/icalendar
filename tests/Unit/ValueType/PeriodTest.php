@@ -41,4 +41,43 @@ final class PeriodTest extends TestCase
             Duration::hours(1),
         );
     }
+
+    public function test_explicit_end_must_follow_start(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        Period::between($this->utc('2026-07-01 09:00:00'), $this->utc('2026-07-01 08:00:00'));
+    }
+
+    public function test_subsecond_end_cannot_serialize_as_a_zero_length_period(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        Period::between(
+            $this->utc('2026-07-01 09:00:00.100000'),
+            $this->utc('2026-07-01 09:00:00.200000'),
+        );
+    }
+
+    public function test_explicit_end_cannot_use_a_different_timezone_identifier(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        Period::between(
+            DateTimeValue::zoned(new DateTimeImmutable('2026-07-01 08:00:00'), 'Europe/Paris'),
+            DateTimeValue::zoned(new DateTimeImmutable('2026-07-01 09:00:00'), 'Europe/London'),
+        );
+    }
+
+    public function test_explicit_end_must_use_a_compatible_date_time_form(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        Period::between(
+            $this->utc('2026-07-01 08:00:00'),
+            DateTimeValue::floating(new DateTimeImmutable('2026-07-01 09:00:00', new DateTimeZone('UTC'))),
+        );
+    }
+
+    public function test_duration_must_be_positive(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        Period::lasting($this->utc('2026-07-01 08:00:00'), Duration::hours(-1));
+    }
 }

@@ -41,7 +41,7 @@ final readonly class Alarm extends Component
 
         return match (true) {
             $value instanceof AlarmAction => $value,
-            $value instanceof TextValue => AlarmAction::tryFrom($value->text),
+            $value instanceof TextValue => AlarmAction::tryFrom(strtoupper($value->text)),
             default => null,
         };
     }

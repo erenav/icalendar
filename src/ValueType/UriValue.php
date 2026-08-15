@@ -14,6 +14,9 @@ final readonly class UriValue implements Value
     public function __construct(
         public string $uri,
     ) {
+        if (strpbrk($uri, "\r\n") !== false) {
+            throw new InvalidValueException('A URI value cannot contain a carriage return or line feed.');
+        }
         if (preg_match('/^[A-Za-z][A-Za-z0-9+.\-]*:/', $uri) !== 1) {
             throw new InvalidValueException(sprintf('URI value "%s" is missing a scheme.', $uri));
         }

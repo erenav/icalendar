@@ -14,6 +14,7 @@ use Erenav\ICalendar\Component\Event;
 use Erenav\ICalendar\Component\GenericComponent;
 use Erenav\ICalendar\Component\Observance;
 use Erenav\ICalendar\Component\TimeZone;
+use Erenav\ICalendar\Exception\InvalidValueException;
 use Erenav\ICalendar\Exception\ParseException;
 use Erenav\ICalendar\Parameter\CuType;
 use Erenav\ICalendar\Parameter\FreeBusyType;
@@ -41,16 +42,17 @@ use Erenav\ICalendar\ValueType\TextValue;
 use Erenav\ICalendar\ValueType\UriValue;
 use Erenav\ICalendar\ValueType\UtcOffset;
 use Erenav\ICalendar\ValueType\Value;
-use Throwable;
+use Exception;
 
 /**
  * Parses RFC 5545 text into the component tree.
  *
  * Pipeline: unfold lines → split each into name/parameters/value → hydrate typed
  * values (merging TZID / VALUE / ENCODING back into the value) → assemble the
- * Composite tree. Lenient by default: anything it can't type is preserved as a
- * {@see RawValue} (and unknown components as {@see GenericComponent}), so no data
- * is lost. {@see self::strict()} instead throws {@see ParseException}.
+ * Composite tree. Lenient by default: untyped property values are generally
+ * preserved as {@see RawValue} (and unknown components as
+ * {@see GenericComponent}) for canonical semantic re-export. It does not promise
+ * byte-for-byte input fidelity. {@see self::strict()} rejects malformed input.
  */
 final class Parser
 {
@@ -70,7 +72,7 @@ final class Parser
         'CONTACT' => 'TEXT', 'CATEGORIES' => 'TEXT', 'RESOURCES' => 'TEXT', 'STATUS' => 'TEXT',
         'TRANSP' => 'TEXT', 'CLASS' => 'TEXT', 'ACTION' => 'TEXT', 'UID' => 'TEXT', 'PRODID' => 'TEXT',
         'VERSION' => 'TEXT', 'CALSCALE' => 'TEXT', 'METHOD' => 'TEXT', 'NAME' => 'TEXT', 'COLOR' => 'TEXT',
-        'TZID' => 'TEXT', 'TZNAME' => 'TEXT', 'RELATED-TO' => 'TEXT', 'REQUEST-STATUS' => 'TEXT',
+        'TZID' => 'TEXT', 'TZNAME' => 'TEXT', 'RELATED-TO' => 'TEXT',
         'RRULE' => 'RECUR',
     ];
 
@@ -127,6 +129,12 @@ final class Parser
                     }
 
                     continue;
+                }
+
+                $endName = strtoupper(trim($rawValue));
+                $openName = $stack[array_key_last($stack)]->name;
+                if ($this->strict && $endName !== $openName) {
+                    throw new ParseException(sprintf('END:%s does not match open BEGIN:%s.', $endName, $openName));
                 }
 
                 $component = $this->buildComponent(array_pop($stack));
@@ -257,26 +265,109 @@ final class Parser
      */
     private function hydrateProperty(string $name, array $parameters, string $rawValue): Property
     {
+        /** @var array<string, list<string>> $parameterValues */
+        $parameterValues = [];
+        /** @var list<string> $parameterOrder */
+        $parameterOrder = [];
+        /** @var array<string, true> $duplicateParameters */
+        $duplicateParameters = [];
+        foreach ($parameters as [$paramName, $paramValues]) {
+            $paramName = strtoupper($paramName);
+            if (isset($parameterValues[$paramName])) {
+                $duplicateParameters[$paramName] = true;
+                array_push($parameterValues[$paramName], ...$paramValues);
+            } else {
+                $parameterOrder[] = $paramName;
+                $parameterValues[$paramName] = $paramValues;
+            }
+        }
+        if ($this->strict && $duplicateParameters !== []) {
+            throw new ParseException(sprintf(
+                'Property "%s" contains duplicate parameter name(s): %s.',
+                $name,
+                implode(', ', array_keys($duplicateParameters)),
+            ));
+        }
+
         $tzid = null;
         $valueType = null;
         $encoding = null;
         $bagParameters = [];
 
-        foreach ($parameters as [$paramName, $paramValues]) {
-            $paramName = strtoupper($paramName);
+        foreach ($parameterOrder as $paramName) {
+            $paramValues = $parameterValues[$paramName];
             match ($paramName) {
-                'TZID' => $tzid = $paramValues[0] ?? null,
-                'VALUE' => $valueType = strtoupper($paramValues[0] ?? ''),
-                'ENCODING' => $encoding = strtoupper($paramValues[0] ?? ''),
+                'TZID' => [$tzid, $bagParameters[]] = [$paramValues[0] ?? null, new RawParameter($paramName, ...$paramValues)],
+                'VALUE' => [$valueType, $bagParameters[]] = [strtoupper($paramValues[0] ?? ''), new RawParameter($paramName, ...$paramValues)],
+                'ENCODING' => [$encoding, $bagParameters[]] = [strtoupper($paramValues[0] ?? ''), new RawParameter($paramName, ...$paramValues)],
                 default => $bagParameters[] = $this->hydrateParameter($paramName, $paramValues),
             };
         }
 
+        $ambiguousControllingParameters = [];
+        foreach (['TZID', 'VALUE', 'ENCODING'] as $controllingParameter) {
+            if (isset($duplicateParameters[$controllingParameter])
+                || count($parameterValues[$controllingParameter] ?? []) > 1) {
+                $ambiguousControllingParameters[] = $controllingParameter;
+            }
+        }
+        if ($ambiguousControllingParameters !== [] && $this->strict) {
+            throw new ParseException(sprintf(
+                'Property "%s" contains multi-valued controlling parameter(s): %s.',
+                $name,
+                implode(', ', $ambiguousControllingParameters),
+            ));
+        }
+
         $type = $this->effectiveType(strtoupper($name), $valueType, $encoding);
+
+        // TZID, VALUE, and ENCODING control how every value on the property is
+        // interpreted. Choosing the first of several values would silently
+        // reinterpret external data, so lenient mode preserves the value raw.
+        if ($ambiguousControllingParameters !== []) {
+            return new Property($name, new RawValue($rawValue), new ParameterBag(...$bagParameters));
+        }
+
+        if ($tzid !== null && ! in_array($type, ['DATE', 'DATE-TIME', 'PERIOD', 'RAW'], true)) {
+            if ($this->strict) {
+                throw new ParseException(sprintf(
+                    'Property "%s" cannot carry TZID with its %s value type.',
+                    $name,
+                    $type,
+                ));
+            }
+
+            return new Property($name, new RawValue($rawValue), new ParameterBag(...$bagParameters));
+        }
+
+        if ($encoding !== null && $type !== 'RAW') {
+            $knownEncoding = in_array($encoding, ['8BIT', 'BASE64'], true);
+            $contradictoryEncoding = $knownEncoding
+                && (($encoding === 'BASE64') !== ($type === 'BINARY'));
+            if ($contradictoryEncoding && $this->strict) {
+                throw new ParseException(sprintf(
+                    'Property "%s" has ENCODING=%s incompatible with its %s value type.',
+                    $name,
+                    $encoding,
+                    $type,
+                ));
+            }
+
+            // An unsupported encoding cannot be decoded safely. A known but
+            // contradictory one is malformed. Preserve either value raw in
+            // lenient mode so subsequent serialization cannot mislabel it.
+            if (! $knownEncoding || $contradictoryEncoding) {
+                return new Property($name, new RawValue($rawValue), new ParameterBag(...$bagParameters));
+            }
+        }
 
         try {
             $values = $this->hydrateValues($type, strtoupper($name), $rawValue, $tzid);
-        } catch (Throwable $exception) {
+        } catch (Exception $exception) {
+            // Malformed external values are reported by value parsers through
+            // Exception subclasses. Errors (including TypeError) deliberately
+            // remain visible because they indicate a programming defect rather
+            // than input that lenient mode should preserve as raw data.
             if ($this->strict) {
                 throw new ParseException(
                     sprintf('Could not parse value of property "%s": %s', $name, $exception->getMessage()),
@@ -294,7 +385,7 @@ final class Parser
      */
     private function hydrateParameter(string $name, array $values): ParameterValue|RawParameter
     {
-        $first = $values[0] ?? '';
+        $first = strtoupper($values[0] ?? '');
         $enum = match ($name) {
             'ROLE' => Role::tryFrom($first),
             'PARTSTAT' => PartStat::tryFrom($first),
@@ -327,6 +418,9 @@ final class Parser
                 'INTEGER' => 'INTEGER',
                 'BOOLEAN' => 'BOOLEAN',
                 'CAL-ADDRESS' => 'CAL-ADDRESS',
+                // GEO is the package's typed representation of the RFC pair
+                // of FLOAT values; a general scalar FLOAT type is not modeled.
+                'FLOAT' => $name === 'GEO' ? 'GEO' : 'RAW',
                 'UTC-OFFSET' => 'UTC-OFFSET',
                 'RECUR' => 'RECUR',
                 default => 'RAW',
@@ -351,7 +445,7 @@ final class Parser
 
         // RECUR values contain semicolons and commas internally — never split them.
         if ($type === 'RECUR') {
-            return [Recurrence::parse($rawValue)];
+            return [Recurrence::parse($rawValue, $this->strict)];
         }
 
         $parts = in_array($name, self::MULTI_VALUE, true)
@@ -366,6 +460,10 @@ final class Parser
 
     private function hydrateScalar(string $type, string $part, ?string $tzid): Value
     {
+        if ($type === 'DATE' && $tzid !== null) {
+            throw new ParseException('A DATE value cannot carry a TZID parameter.');
+        }
+
         return match ($type) {
             'TEXT' => new TextValue($this->unescapeText($part)),
             'INTEGER' => IntegerValue::parse($part),
@@ -386,7 +484,7 @@ final class Parser
     private function parseDate(string $part): DateTimeValue
     {
         $dateTime = DateTimeImmutable::createFromFormat('!Ymd', $part, new DateTimeZone('UTC'));
-        if ($dateTime === false) {
+        if ($dateTime === false || $dateTime->format('Ymd') !== $part) {
             throw new ParseException(sprintf('Malformed DATE value "%s".', $part));
         }
 
@@ -396,19 +494,18 @@ final class Parser
     private function parseDateTime(string $part, ?string $tzid): DateTimeValue
     {
         if (str_ends_with($part, 'Z') || str_ends_with($part, 'z')) {
+            if ($tzid !== null) {
+                throw new ParseException('A UTC DATE-TIME value cannot also carry a TZID parameter.');
+            }
+
             return DateTimeValue::utc($this->fromFormat(substr($part, 0, -1), new DateTimeZone('UTC')));
         }
 
         if ($tzid !== null) {
-            try {
-                $zone = new DateTimeZone($tzid);
-            } catch (Throwable) {
-                // Custom (e.g. VTIMEZONE-defined) ids aren't PHP zones; the wall-clock
-                // components are captured in UTC and the tzid string is preserved verbatim.
-                $zone = new DateTimeZone('UTC');
-            }
-
-            return DateTimeValue::zoned($this->fromFormat($part, $zone), $tzid);
+            // Parse the lexical fields without letting PHP normalise DST gaps;
+            // DateTimeValue resolves them with RFC 5545's pre-gap rule. Custom
+            // VTIMEZONE ids remain a UTC-backed wall clock with the id retained.
+            return DateTimeValue::zoned($this->fromFormat($part, new DateTimeZone('UTC')), $tzid);
         }
 
         return DateTimeValue::floating($this->fromFormat($part, new DateTimeZone('UTC')));
@@ -417,7 +514,7 @@ final class Parser
     private function fromFormat(string $part, DateTimeZone $zone): DateTimeImmutable
     {
         $dateTime = DateTimeImmutable::createFromFormat('!Ymd\THis', $part, $zone);
-        if ($dateTime === false) {
+        if ($dateTime === false || $dateTime->format('Ymd\THis') !== $part) {
             throw new ParseException(sprintf('Malformed DATE-TIME value "%s".', $part));
         }
 
@@ -475,14 +572,20 @@ final class Parser
         $length = strlen($value);
 
         for ($i = 0; $i < $length; $i++) {
-            if ($value[$i] === '\\' && $i + 1 < $length) {
+            if ($value[$i] === '\\') {
+                if ($i + 1 >= $length) {
+                    throw new InvalidValueException('A TEXT value cannot end with an incomplete escape sequence.');
+                }
                 $next = $value[$i + 1];
                 $out .= match ($next) {
                     'n', 'N' => "\n",
                     '\\' => '\\',
                     ',' => ',',
                     ';' => ';',
-                    default => $next,
+                    default => throw new InvalidValueException(sprintf(
+                        'Invalid TEXT escape sequence "\\%s".',
+                        $next,
+                    )),
                 };
                 $i++;
 

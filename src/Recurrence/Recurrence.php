@@ -31,6 +31,7 @@ final readonly class Recurrence implements Value
      * @param  list<int>  $byMinute
      * @param  list<int>  $bySecond
      * @param  list<int>  $bySetPosition
+     * @param  list<RecurrencePart>  $unknownParts
      */
     public function __construct(
         public Frequency $frequency,
@@ -47,15 +48,49 @@ final readonly class Recurrence implements Value
         public array $bySecond = [],
         public array $bySetPosition = [],
         public ?Weekday $weekStart = null,
+        public array $unknownParts = [],
     ) {
-        if ($interval < 1) {
-            throw new InvalidValueException('RRULE INTERVAL must be >= 1.');
+        self::validateInstances($byDay, WeekdayRule::class, 'RRULE BYDAY values must be WeekdayRule instances.');
+        self::validateInstances($unknownParts, RecurrencePart::class, 'Unknown RRULE parts must be RecurrencePart instances.');
+        if ($interval < 1 || $interval > 2147483647) {
+            throw new InvalidValueException('RRULE INTERVAL must be within 1..2147483647.');
         }
-        if ($count !== null && $count < 1) {
-            throw new InvalidValueException('RRULE COUNT must be >= 1.');
+        if ($count !== null && ($count < 1 || $count > 2147483647)) {
+            throw new InvalidValueException('RRULE COUNT must be within 1..2147483647.');
         }
         if ($count !== null && $until !== null) {
             throw new InvalidValueException('RRULE COUNT and UNTIL are mutually exclusive.');
+        }
+        if ($until?->tzid !== null) {
+            throw new InvalidValueException('RRULE UNTIL cannot carry a TZID; use a UTC or floating DATE-TIME, or a DATE value.');
+        }
+        self::validateList('BYSECOND', $bySecond, 0, 60);
+        self::validateList('BYMINUTE', $byMinute, 0, 59);
+        self::validateList('BYHOUR', $byHour, 0, 23);
+        self::validateList('BYMONTH', $byMonth, 1, 12);
+        self::validateList('BYMONTHDAY', $byMonthDay, -31, 31, true);
+        self::validateList('BYYEARDAY', $byYearDay, -366, 366, true);
+        self::validateList('BYWEEKNO', $byWeekNo, -53, 53, true);
+        self::validateList('BYSETPOS', $bySetPosition, -366, 366, true);
+        if ($byWeekNo !== [] && $frequency !== Frequency::Yearly) {
+            throw new InvalidValueException('RRULE BYWEEKNO is only valid with YEARLY frequency.');
+        }
+        if ($byYearDay !== [] && in_array($frequency, [Frequency::Daily, Frequency::Weekly, Frequency::Monthly], true)) {
+            throw new InvalidValueException('RRULE BYYEARDAY is not valid with DAILY, WEEKLY, or MONTHLY frequency.');
+        }
+        if ($byMonthDay !== [] && $frequency === Frequency::Weekly) {
+            throw new InvalidValueException('RRULE BYMONTHDAY is not valid with WEEKLY frequency.');
+        }
+        if ($bySetPosition !== [] && $byDay === [] && $byMonthDay === [] && $byMonth === [] && $byYearDay === [] && $byWeekNo === [] && $byHour === [] && $byMinute === [] && $bySecond === []) {
+            throw new InvalidValueException('RRULE BYSETPOS requires another BY rule part.');
+        }
+        foreach ($byDay as $day) {
+            if ($day->ordinal !== null && ! in_array($frequency, [Frequency::Monthly, Frequency::Yearly], true)) {
+                throw new InvalidValueException('Numeric BYDAY values are only valid with MONTHLY or YEARLY frequency.');
+            }
+            if ($day->ordinal !== null && $frequency === Frequency::Yearly && $byWeekNo !== []) {
+                throw new InvalidValueException('Numeric BYDAY is not valid with BYWEEKNO in a YEARLY rule.');
+            }
         }
     }
 
@@ -148,7 +183,7 @@ final readonly class Recurrence implements Value
         return $this->count === null && $this->until === null;
     }
 
-    public static function parse(string $value): self
+    public static function parse(string $value, bool $strict = false): self
     {
         $parts = [
             'interval' => 1, 'count' => null, 'until' => null, 'weekStart' => null,
@@ -156,10 +191,13 @@ final readonly class Recurrence implements Value
             'byWeekNo' => [], 'byHour' => [], 'byMinute' => [], 'bySecond' => [], 'bySetPosition' => [],
         ];
         $frequency = null;
+        $unknownParts = [];
+        $knownNames = ['FREQ' => true, 'INTERVAL' => true, 'COUNT' => true, 'UNTIL' => true, 'WKST' => true, 'BYDAY' => true, 'BYMONTHDAY' => true, 'BYMONTH' => true, 'BYYEARDAY' => true, 'BYWEEKNO' => true, 'BYHOUR' => true, 'BYMINUTE' => true, 'BYSECOND' => true, 'BYSETPOS' => true];
+        $seenKnown = [];
 
-        foreach (explode(';', $value) as $segment) {
+        foreach (self::segments($value) as $segment) {
             if ($segment === '') {
-                continue;
+                throw new InvalidValueException('RRULE contains an empty segment.');
             }
             $eq = strpos($segment, '=');
             if ($eq === false) {
@@ -167,6 +205,12 @@ final readonly class Recurrence implements Value
             }
             $key = strtoupper(substr($segment, 0, $eq));
             $raw = substr($segment, $eq + 1);
+            if (isset($knownNames[$key])) {
+                if (isset($seenKnown[$key])) {
+                    throw new InvalidValueException(sprintf('RRULE part "%s" occurs more than once.', $key));
+                }
+                $seenKnown[$key] = true;
+            }
 
             match ($key) {
                 'FREQ' => $frequency = Frequency::tryFrom(strtoupper($raw))
@@ -185,7 +229,9 @@ final readonly class Recurrence implements Value
                 'BYMINUTE' => $parts['byMinute'] = self::ints($raw),
                 'BYSECOND' => $parts['bySecond'] = self::ints($raw),
                 'BYSETPOS' => $parts['bySetPosition'] = self::ints($raw),
-                default => null, // ignore unknown parts leniently
+                default => $strict
+                    ? throw new InvalidValueException(sprintf('Unknown RRULE part "%s".', $key))
+                    : $unknownParts[] = new RecurrencePart($key, $raw),
             };
         }
 
@@ -208,6 +254,7 @@ final readonly class Recurrence implements Value
             $parts['bySecond'],
             $parts['bySetPosition'],
             $parts['weekStart'],
+            $unknownParts,
         );
     }
 
@@ -254,6 +301,9 @@ final readonly class Recurrence implements Value
         if ($this->weekStart !== null) {
             $segments[] = 'WKST='.$this->weekStart->value;
         }
+        foreach ($this->unknownParts as $part) {
+            $segments[] = $part->toString();
+        }
 
         return implode(';', $segments);
     }
@@ -278,7 +328,8 @@ final readonly class Recurrence implements Value
      *     byMinute?: list<int>,
      *     bySecond?: list<int>,
      *     bySetPosition?: list<int>,
-     *     weekStart?: Weekday|null
+     *     weekStart?: Weekday|null,
+     *     unknownParts?: list<RecurrencePart>
      * } $changes
      */
     private function copy(array $changes): self
@@ -298,13 +349,48 @@ final readonly class Recurrence implements Value
             $changes['bySecond'] ?? $this->bySecond,
             $changes['bySetPosition'] ?? $this->bySetPosition,
             array_key_exists('weekStart', $changes) ? $changes['weekStart'] : $this->weekStart,
+            $changes['unknownParts'] ?? $this->unknownParts,
         );
+    }
+
+    /** @param array<array-key, mixed> $values */
+    private static function validateList(string $part, array $values, int $min, int $max, bool $nonZero = false): void
+    {
+        foreach ($values as $value) {
+            if (! is_int($value)) {
+                throw new InvalidValueException(sprintf('RRULE %s values must be integers.', $part));
+            }
+            if ($value < $min || $value > $max || ($nonZero && $value === 0)) {
+                throw new InvalidValueException(sprintf('RRULE %s value %d is outside its RFC-defined range.', $part, $value));
+            }
+        }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $values
+     * @param  class-string  $class
+     */
+    private static function validateInstances(array $values, string $class, string $message): void
+    {
+        foreach ($values as $value) {
+            if (! $value instanceof $class) {
+                throw new InvalidValueException($message);
+            }
+        }
     }
 
     private static function int(string $value): int
     {
         if (preg_match('/^[+-]?\d+$/', $value) !== 1) {
             throw new InvalidValueException(sprintf('Expected an integer in RRULE, got "%s".', $value));
+        }
+
+        $negative = str_starts_with($value, '-');
+        $digits = ltrim($value, '+-0');
+        $digits = $digits === '' ? '0' : $digits;
+        $limit = $negative ? '2147483648' : '2147483647';
+        if (strlen($digits) > strlen($limit) || (strlen($digits) === strlen($limit) && strcmp($digits, $limit) > 0)) {
+            throw new InvalidValueException(sprintf('RRULE integer "%s" is outside the signed 32-bit range.', $value));
         }
 
         return (int) $value;
@@ -316,11 +402,34 @@ final readonly class Recurrence implements Value
         return array_map(self::int(...), explode(',', $value));
     }
 
+    /** @return list<string> */
+    private static function segments(string $value): array
+    {
+        $segments = [];
+        $segment = '';
+        $escaped = false;
+        for ($i = 0, $length = strlen($value); $i < $length; $i++) {
+            $character = $value[$i];
+            if ($character === ';' && ! $escaped) {
+                $segments[] = $segment;
+                $segment = '';
+
+                continue;
+            }
+
+            $segment .= $character;
+            $escaped = $character === '\\' ? ! $escaped : false;
+        }
+        $segments[] = $segment;
+
+        return $segments;
+    }
+
     private static function parseUntil(string $value): DateTimeValue
     {
         if (! str_contains($value, 'T')) {
             $date = \DateTimeImmutable::createFromFormat('!Ymd', $value, new \DateTimeZone('UTC'));
-            if ($date === false) {
+            if ($date === false || $date->format('Ymd') !== $value) {
                 throw new InvalidValueException(sprintf('Malformed RRULE UNTIL "%s".', $value));
             }
 
@@ -330,7 +439,7 @@ final readonly class Recurrence implements Value
         $isUtc = str_ends_with($value, 'Z') || str_ends_with($value, 'z');
         $literal = $isUtc ? substr($value, 0, -1) : $value;
         $dateTime = \DateTimeImmutable::createFromFormat('!Ymd\THis', $literal, new \DateTimeZone('UTC'));
-        if ($dateTime === false) {
+        if ($dateTime === false || $dateTime->format('Ymd\THis') !== $literal) {
             throw new InvalidValueException(sprintf('Malformed RRULE UNTIL "%s".', $value));
         }
 

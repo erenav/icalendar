@@ -26,6 +26,18 @@ final readonly class Period implements Value
         if ($end !== null && $end->isDateOnly) {
             throw new InvalidValueException('A PERIOD end must be a DATE-TIME, not a DATE.');
         }
+        if ($end !== null && $end->tzid !== $start->tzid) {
+            throw new InvalidValueException('A PERIOD start and end cannot carry different timezone identifiers.');
+        }
+        if ($end !== null && ($end->isUtc !== $start->isUtc || $end->isFloating() !== $start->isFloating())) {
+            throw new InvalidValueException('A PERIOD start and end must use compatible UTC, floating, or zoned DATE-TIME forms.');
+        }
+        if ($end !== null && $end->dateTime <= $start->dateTime) {
+            throw new InvalidValueException('A PERIOD end must be later than its start.');
+        }
+        if ($duration !== null && $duration->toSeconds() <= 0) {
+            throw new InvalidValueException('A PERIOD duration must be positive.');
+        }
     }
 
     /** An explicit period: start "/" end. */

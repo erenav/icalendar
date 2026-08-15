@@ -63,6 +63,7 @@ final class DurationTest extends TestCase
             'time only' => ['PT1H30M'],
             'negative' => ['-PT1H30M'],
             'seconds' => ['PT45S'],
+            'zero' => ['PT0S'],
         ];
     }
 
@@ -76,6 +77,21 @@ final class DurationTest extends TestCase
     {
         $this->expectException(InvalidValueException::class);
         Duration::parse('PT');
+    }
+
+    public function test_parse_rejects_components_and_totals_that_would_overflow(): void
+    {
+        foreach (['P999999999999999999999999D', 'P'.PHP_INT_MAX.'D'] as $wire) {
+            try {
+                Duration::parse($wire);
+                $this->fail(sprintf('Expected "%s" to be rejected.', $wire));
+            } catch (InvalidValueException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+
+        $this->expectException(InvalidValueException::class);
+        Duration::seconds(PHP_INT_MIN);
     }
 
     public function test_to_seconds(): void

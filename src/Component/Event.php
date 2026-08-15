@@ -6,6 +6,8 @@ namespace Erenav\ICalendar\Component;
 
 use DateTimeInterface;
 use Erenav\ICalendar\Builder\EventBuilder;
+use Erenav\ICalendar\Parameter\Range;
+use Erenav\ICalendar\Parameter\RawParameter;
 use Erenav\ICalendar\Property\Attendee;
 use Erenav\ICalendar\Property\Classification;
 use Erenav\ICalendar\Property\EventStatus;
@@ -15,9 +17,11 @@ use Erenav\ICalendar\Property\Transparency;
 use Erenav\ICalendar\Recurrence\Recurrence;
 use Erenav\ICalendar\Recurrence\RecurrenceExpander;
 use Erenav\ICalendar\Recurrence\RlanvinRecurrenceExpander;
+use Erenav\ICalendar\TimeZone\TimeZoneResolver;
 use Erenav\ICalendar\ValueType\DateTimeValue;
 use Erenav\ICalendar\ValueType\Duration;
 use Erenav\ICalendar\ValueType\GeoValue;
+use Erenav\ICalendar\ValueType\Period;
 use Erenav\ICalendar\ValueType\TextValue;
 
 /**
@@ -99,9 +103,11 @@ final readonly class Event extends Component
 
     /**
      * The end instant: DTEND if present, otherwise DTSTART + DURATION resolved in
-     * the start's own form. Null when neither is determinable.
+     * the start's own form. A second-occurrence DST-fold end falls back to UTC
+     * because its local TZID wall form cannot identify that instant unambiguously.
+     * Null when neither is determinable.
      */
-    public function end(): ?DateTimeValue
+    public function end(?TimeZoneResolver $timeZones = null): ?DateTimeValue
     {
         $dtend = $this->dateTimeOf('DTEND');
         if ($dtend !== null) {
@@ -114,14 +120,35 @@ final readonly class Event extends Component
             return null;
         }
 
-        $shifted = $start->dateTime->add($duration->toDateInterval());
+        return $timeZones !== null && $start->tzid !== null
+            ? $timeZones->addDuration($start, $duration)
+            : $start->adding($duration);
+    }
 
-        return match (true) {
-            $start->isDateOnly => DateTimeValue::date($shifted),
-            $start->isUtc => DateTimeValue::utc($shifted),
-            $start->tzid !== null => DateTimeValue::zoned($shifted, $start->tzid),
-            default => DateTimeValue::floating($shifted),
-        };
+    /**
+     * The RFC 5545 effective end boundary.
+     *
+     * Unlike {@see self::end()}, this also applies VEVENT's implicit duration:
+     * a DATE starts a one-day event and a DATE-TIME with no DTEND/DURATION has
+     * zero duration. Keeping this separate preserves the historical nullable
+     * behavior of {@see self::end()}.
+     */
+    public function effectiveEnd(?TimeZoneResolver $timeZones = null): ?DateTimeValue
+    {
+        $explicit = $this->end($timeZones);
+        if ($explicit !== null) {
+            return $explicit;
+        }
+
+        $start = $this->start();
+        if ($start === null) {
+            return null;
+        }
+        if (! $start->isDateOnly) {
+            return $start;
+        }
+
+        return DateTimeValue::date($start->dateTime->modify('+1 day'));
     }
 
     public function status(): ?EventStatus
@@ -130,7 +157,7 @@ final readonly class Event extends Component
 
         return match (true) {
             $value instanceof EventStatus => $value,
-            $value instanceof TextValue => EventStatus::tryFrom($value->text),
+            $value instanceof TextValue => EventStatus::tryFrom(strtoupper($value->text)),
             default => null,
         };
     }
@@ -140,10 +167,22 @@ final readonly class Event extends Component
         return $this->status() === EventStatus::Cancelled;
     }
 
-    /** The RECURRENCE-ID — present only on an override that modifies one instance of a series. */
+    /** The original series slot identified by a detached recurrence component. */
     public function recurrenceId(): ?DateTimeValue
     {
         return $this->dateTimeOf('RECURRENCE-ID');
+    }
+
+    /** RANGE belongs to RECURRENCE-ID; null denotes a single-instance override. */
+    public function recurrenceRange(): ?Range
+    {
+        $range = $this->properties->first('RECURRENCE-ID')?->parameter('RANGE');
+
+        return match (true) {
+            $range instanceof Range => $range,
+            $range instanceof RawParameter && count($range->values) === 1 => Range::tryFrom(strtoupper($range->value())),
+            default => null,
+        };
     }
 
     public function transparency(): ?Transparency
@@ -152,7 +191,7 @@ final readonly class Event extends Component
 
         return match (true) {
             $value instanceof Transparency => $value,
-            $value instanceof TextValue => Transparency::tryFrom($value->text),
+            $value instanceof TextValue => Transparency::tryFrom(strtoupper($value->text)),
             default => null,
         };
     }
@@ -163,7 +202,7 @@ final readonly class Event extends Component
 
         return match (true) {
             $value instanceof Classification => $value,
-            $value instanceof TextValue => Classification::tryFrom($value->text),
+            $value instanceof TextValue => Classification::tryFrom(strtoupper($value->text)),
             default => null,
         };
     }
@@ -183,6 +222,11 @@ final readonly class Event extends Component
     public function sequence(): ?int
     {
         return $this->intOf('SEQUENCE');
+    }
+
+    public function color(): ?string
+    {
+        return $this->stringOf('COLOR');
     }
 
     /** @return list<string> */
@@ -239,15 +283,39 @@ final readonly class Event extends Component
         return $this->collectDateTimes('RDATE');
     }
 
+    /**
+     * PERIOD-valued RDATEs, kept separate because each carries its own end/duration.
+     *
+     * @return list<Period>
+     */
+    public function recurrenceDatePeriods(): array
+    {
+        $periods = [];
+        foreach ($this->properties->all('RDATE') as $property) {
+            foreach ($property->values as $value) {
+                if ($value instanceof Period) {
+                    $periods[] = $value;
+                }
+            }
+        }
+
+        return $periods;
+    }
+
     public function isRecurring(): bool
     {
-        return $this->recurrenceRule() !== null || $this->recurrenceDates() !== [];
+        return $this->recurrenceRule() !== null || $this->recurrenceDates() !== [] || $this->recurrenceDatePeriods() !== [];
     }
 
     /**
      * Expand this event's occurrences that start within [$from, $to] (inclusive).
-     * Honours RRULE, RDATE and EXDATE; a non-recurring event yields its single
-     * start if it falls in range. Pass a custom expander to override the engine.
+     * Honours RRULE, DATE/DATE-TIME/PERIOD RDATE and EXDATE; a non-recurring
+     * event yields its single start if it falls in range. This start-only API
+     * cannot expose a PERIOD's end; use Calendar::occurrencesBetween() when the
+     * effective occurrence end is required.
+     *
+     * UTC/zoned results are instants. DATE/floating results are neutral
+     * DateTimeImmutable containers for their calendar fields.
      *
      * @return list<\DateTimeImmutable>
      */

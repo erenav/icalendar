@@ -16,8 +16,8 @@ final readonly class WeekdayRule
         public Weekday $weekday,
         public ?int $ordinal = null,
     ) {
-        if ($ordinal === 0) {
-            throw new InvalidValueException('A BYDAY ordinal cannot be zero.');
+        if ($ordinal === 0 || ($ordinal !== null && abs($ordinal) > 53)) {
+            throw new InvalidValueException('A BYDAY ordinal must be between -53 and 53 and cannot be zero.');
         }
     }
 

@@ -21,6 +21,7 @@ final readonly class CalAddress implements Value
     /** Build from a bare email address, prefixing the `mailto:` scheme. */
     public static function fromEmail(string $email): self
     {
+        self::rejectLineBreaks($email);
         $email = trim($email);
         if ($email === '') {
             throw new InvalidValueException('Email address cannot be empty.');
@@ -32,6 +33,7 @@ final readonly class CalAddress implements Value
     /** Build from any URI (must include a scheme). */
     public static function fromUri(string $uri): self
     {
+        self::rejectLineBreaks($uri);
         $uri = trim($uri);
         if (preg_match('/^[A-Za-z][A-Za-z0-9+.\-]*:/', $uri) !== 1) {
             throw new InvalidValueException(sprintf('Cal-address "%s" is not a valid URI (missing scheme).', $uri));
@@ -64,5 +66,12 @@ final readonly class CalAddress implements Value
     public function equals(self $other): bool
     {
         return $this->uri === $other->uri;
+    }
+
+    private static function rejectLineBreaks(string $value): void
+    {
+        if (strpbrk($value, "\r\n") !== false) {
+            throw new InvalidValueException('A calendar address cannot contain a carriage return or line feed.');
+        }
     }
 }

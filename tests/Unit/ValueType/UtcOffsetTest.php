@@ -62,4 +62,15 @@ final class UtcOffsetTest extends TestCase
     {
         $this->assertTrue(UtcOffset::of(5, 0)->equals(UtcOffset::fromSeconds(18000)));
     }
+
+    public function test_component_ranges_are_validated(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        UtcOffset::parse('+246000');
+    }
+
+    public function test_maximum_grammar_value_stays_rfc_serializable(): void
+    {
+        $this->assertSame('+235960', UtcOffset::parse('+235960')->toString());
+    }
 }

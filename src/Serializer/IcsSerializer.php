@@ -5,15 +5,23 @@ declare(strict_types=1);
 namespace Erenav\ICalendar\Serializer;
 
 use Erenav\ICalendar\Component\Component;
+use Erenav\ICalendar\Exception\InvalidValueException;
 use Erenav\ICalendar\Exception\MissingPropertyException;
 use Erenav\ICalendar\Parameter\ParameterValue;
 use Erenav\ICalendar\Parameter\RawParameter;
 use Erenav\ICalendar\Property\Property;
+use Erenav\ICalendar\Recurrence\Recurrence;
 use Erenav\ICalendar\ValueType\BinaryValue;
+use Erenav\ICalendar\ValueType\BooleanValue;
+use Erenav\ICalendar\ValueType\CalAddress;
 use Erenav\ICalendar\ValueType\DateTimeValue;
 use Erenav\ICalendar\ValueType\Duration;
+use Erenav\ICalendar\ValueType\GeoValue;
+use Erenav\ICalendar\ValueType\IntegerValue;
 use Erenav\ICalendar\ValueType\Period;
 use Erenav\ICalendar\ValueType\TextValue;
+use Erenav\ICalendar\ValueType\UriValue;
+use Erenav\ICalendar\ValueType\UtcOffset;
 use Erenav\ICalendar\ValueType\Value;
 
 /**
@@ -107,6 +115,8 @@ final class IcsSerializer implements Serializer
             $parameters[$this->parameterName($parameter)] = $this->parameterValue($parameter);
         }
 
+        $this->assertExplicitControllingParametersMatch($property);
+
         foreach ($this->derivedParameters($property) as $name => $value) {
             $parameters[$name] = $value;
         }
@@ -117,11 +127,127 @@ final class IcsSerializer implements Serializer
     /** @return array<string, string> */
     private function derivedParameters(Property $property): array
     {
+        $derived = null;
+        $signature = null;
+
+        foreach ($property->values as $value) {
+            $candidate = $this->derivedParametersForValue($property, $value);
+            $candidateSignature = $this->controllingParameterSignature($value);
+            if ($signature !== null && $candidateSignature !== $signature) {
+                throw new InvalidValueException(sprintf(
+                    'Property "%s" contains values that require incompatible VALUE, TZID, or ENCODING parameters.',
+                    $property->name,
+                ));
+            }
+            $derived ??= $candidate;
+            $signature = $candidateSignature;
+        }
+
+        return $derived ?? [];
+    }
+
+    /**
+     * Do not let an explicit parameter reinterpret a typed value on the wire.
+     * Raw and otherwise unknown values are deliberately exempt: their explicit
+     * parameters are the only interpretation metadata available for semantic
+     * re-export.
+     */
+    private function assertExplicitControllingParametersMatch(Property $property): void
+    {
         $value = $property->value();
+        $valueType = $this->valueTypeToken($value);
+        if ($valueType === null) {
+            return;
+        }
+
+        $this->assertExplicitParameter(
+            $property,
+            'VALUE',
+            $valueType,
+            caseInsensitive: true,
+        );
+
+        $tzid = match (true) {
+            $value instanceof DateTimeValue => $value->tzid,
+            $value instanceof Period => $value->start->tzid,
+            default => null,
+        };
+        $this->assertExplicitParameter($property, 'TZID', $tzid);
+
+        $this->assertExplicitParameter(
+            $property,
+            'ENCODING',
+            $value instanceof BinaryValue ? 'BASE64' : '8BIT',
+            caseInsensitive: true,
+        );
+    }
+
+    private function assertExplicitParameter(
+        Property $property,
+        string $name,
+        ?string $expected,
+        bool $caseInsensitive = false,
+    ): void {
+        $parameter = $property->parameter($name);
+        if ($parameter === null) {
+            return;
+        }
+
+        $values = $parameter instanceof RawParameter
+            ? $parameter->values
+            : [$parameter->token()];
+        $actual = count($values) === 1 ? $values[0] : null;
+        $matches = $expected !== null
+            && $actual !== null
+            && ($caseInsensitive ? strcasecmp($actual, $expected) === 0 : $actual === $expected);
+
+        if (! $matches) {
+            throw new InvalidValueException(sprintf(
+                'Property "%s" has an explicit %s parameter that contradicts its typed value.',
+                $property->name,
+                $name,
+            ));
+        }
+    }
+
+    /**
+     * Parameters intrinsically required to interpret one typed value. VALUE is
+     * included even when the property's RFC default lets the serializer omit
+     * it, so unlike types cannot be hidden by sharing an omitted default.
+     *
+     * @return array<string, string>
+     */
+    private function controllingParameterSignature(Value $value): array
+    {
+        $signature = [];
+
+        if ($value instanceof DateTimeValue && $value->tzid !== null) {
+            $signature['TZID'] = $value->tzid;
+        }
+        if ($value instanceof Period && $value->start->tzid !== null) {
+            $signature['TZID'] = $value->start->tzid;
+        }
+        if ($value instanceof BinaryValue) {
+            $signature['ENCODING'] = 'BASE64';
+        }
+        if (($token = $this->valueTypeToken($value)) !== null) {
+            $signature['VALUE'] = $token;
+        }
+
+        return $signature;
+    }
+
+    /** @return array<string, string> */
+    private function derivedParametersForValue(Property $property, Value $value): array
+    {
         $derived = [];
 
         if ($value instanceof DateTimeValue && $value->tzid !== null) {
             $derived['TZID'] = $this->encodeParameterValue($value->tzid);
+        }
+
+        if ($value instanceof Period && $value->start->tzid !== null) {
+            $derived['TZID'] = $this->encodeParameterValue($value->start->tzid);
         }
 
         if ($value instanceof BinaryValue) {
@@ -129,7 +255,10 @@ final class IcsSerializer implements Serializer
         }
 
         $token = $this->valueTypeToken($value);
-        if ($token !== null && $token !== (self::DEFAULT_VALUE_TYPE[$property->name] ?? $token)) {
+        if ($token !== null && (
+            $property->name === 'REFRESH-INTERVAL'
+            || $token !== (self::DEFAULT_VALUE_TYPE[$property->name] ?? $token)
+        )) {
             $derived['VALUE'] = $token;
         }
 
@@ -143,17 +272,33 @@ final class IcsSerializer implements Serializer
             $value instanceof Duration => 'DURATION',
             $value instanceof Period => 'PERIOD',
             $value instanceof BinaryValue => 'BINARY',
+            $value instanceof BooleanValue => 'BOOLEAN',
+            $value instanceof CalAddress => 'CAL-ADDRESS',
+            $value instanceof GeoValue => 'FLOAT',
+            $value instanceof IntegerValue => 'INTEGER',
+            $value instanceof Recurrence => 'RECUR',
+            $value instanceof TextValue, $value instanceof \BackedEnum => 'TEXT',
+            $value instanceof UriValue => 'URI',
+            $value instanceof UtcOffset => 'UTC-OFFSET',
             default => null,
         };
     }
 
     private function serializeValue(Value $value): string
     {
-        // TEXT is the only value type that requires escaping; everything else
-        // (including RawValue, emitted verbatim) is already wire-safe.
-        return $value instanceof TextValue
-            ? $this->escapeText($value->text)
-            : $value->toString();
+        if ($value instanceof TextValue) {
+            return $this->escapeText($value->text);
+        }
+
+        $serialized = $value->toString();
+        if (strpbrk($serialized, "\r\n") !== false) {
+            throw new InvalidValueException(sprintf(
+                'A %s value cannot contain a carriage return or line feed.',
+                $value::class,
+            ));
+        }
+
+        return $serialized;
     }
 
     private function parameterName(ParameterValue|RawParameter $parameter): string
@@ -187,7 +332,11 @@ final class IcsSerializer implements Serializer
     /** Quote/encode a parameter value per RFC 5545 §3.2 and RFC 6868. */
     private function encodeParameterValue(string $value): string
     {
-        $value = str_replace(['^', "\n", '"'], ['^^', '^n', "^'"], $value);
+        // Encode existing carets first. The carets introduced for normalized
+        // line breaks and quotes are RFC 6868 escape markers, not literals.
+        $value = str_replace('^', '^^', $value);
+        $value = str_replace(["\r\n", "\r", "\n"], '^n', $value);
+        $value = str_replace('"', "^'", $value);
 
         if ($value === '' || preg_match('/[";:,\s]/', $value) === 1) {
             return '"'.$value.'"';

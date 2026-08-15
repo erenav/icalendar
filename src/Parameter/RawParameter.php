@@ -9,8 +9,8 @@ use Erenav\ICalendar\Exception\InvalidValueException;
 /**
  * A property parameter we don't model as a typed enum — an experimental `X-`
  * parameter, an unregistered IANA token, or a known parameter carrying an
- * unrecognised value. Preserving these verbatim is what keeps the Level-1
- * round-trip lossless (see docs/PHASE-1-SPEC.md).
+ * unrecognised value. Logical values are retained for canonical semantic
+ * re-export; original quoting, escaping, and byte layout are not retained.
  *
  * Holds the logical (already unescaped/unquoted) values; quoting and escaping
  * on the wire are the serializer's concern.

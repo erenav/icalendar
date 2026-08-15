@@ -12,6 +12,7 @@ use Erenav\ICalendar\Property\EventStatus;
 use Erenav\ICalendar\Serializer\IcsSerializer;
 use Erenav\ICalendar\ValueType\DateTimeValue;
 use Erenav\ICalendar\ValueType\Duration;
+use Erenav\ICalendar\ValueType\RawValue;
 use PHPUnit\Framework\TestCase;
 
 final class RoundTripTest extends TestCase
@@ -127,5 +128,55 @@ final class RoundTripTest extends TestCase
         $this->assertSame('Europe/Paris', $event->start()?->tzid);
         $this->assertSame('PT1H', $event->duration()?->toString());
         $this->assertSame(Role::Chair, $event->attendees()[0]->role());
+    }
+
+    public function test_unknown_rrule_parts_survive_repeated_component_round_trips(): void
+    {
+        $input = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:unknown-rule\r\nDTSTART:20260701T100000Z\r\nRRULE:FREQ=DAILY;X-FIRST=one;IANA-PART=a,b;X-LAST=three\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        $parser = Parser::lenient();
+        $serializer = new IcsSerializer;
+        $once = $serializer->serialize($parser->parseCalendar($input));
+        $twice = $serializer->serialize($parser->parseCalendar($once));
+
+        $this->assertSame($once, $twice);
+        $this->assertStringContainsString('RRULE:FREQ=DAILY;X-FIRST=one;IANA-PART=a,b;X-LAST=three', $twice);
+    }
+
+    public function test_period_rdate_survives_repeated_component_round_trips(): void
+    {
+        $input = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:period\r\nDTSTART:20260701T100000Z\r\nRDATE;VALUE=PERIOD:20260702T100000Z/PT2H,20260703T100000Z/20260703T130000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        $parser = Parser::lenient();
+        $serializer = new IcsSerializer;
+        $once = $serializer->serialize($parser->parseCalendar($input));
+        $twice = $serializer->serialize($parser->parseCalendar($once));
+
+        $this->assertSame($once, $twice);
+        $this->assertStringContainsString('RDATE;VALUE=PERIOD:20260702T100000Z/PT2H,20260703T100000Z/202607', $twice);
+        $this->assertCount(2, $parser->parseCalendar($twice)->events()[0]->recurrenceDatePeriods());
+    }
+
+    public function test_explicit_value_encoding_and_invalid_tzid_combinations_are_not_dropped_leniently(): void
+    {
+        $input = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:params\r\nDTSTART;TZID=Provider/Zone:20260701T100000Z\r\nX-DATA;VALUE=X-VENDOR;ENCODING=8BIT:opaque\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        $calendar = Parser::lenient()->parseCalendar($input);
+        $output = (new IcsSerializer)->serialize($calendar);
+
+        $this->assertStringContainsString('DTSTART;TZID=Provider/Zone:20260701T100000Z', $output);
+        $this->assertStringContainsString('X-DATA;VALUE=X-VENDOR;ENCODING=8BIT:opaque', $output);
+        $this->assertNull($calendar->events()[0]->start());
+        $this->assertInstanceOf(RawValue::class, $calendar->events()[0]->property('DTSTART')?->value());
+    }
+
+    public function test_request_status_structural_semicolons_survive_repeated_round_trips(): void
+    {
+        $input = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:request-status\r\nREQUEST-STATUS:2.0;Success\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        $parser = Parser::lenient();
+        $serializer = new IcsSerializer;
+        $once = $serializer->serialize($parser->parseCalendar($input));
+        $twice = $serializer->serialize($parser->parseCalendar($once));
+
+        $this->assertSame($once, $twice);
+        $this->assertStringContainsString('REQUEST-STATUS:2.0;Success', $twice);
+        $this->assertStringNotContainsString('REQUEST-STATUS:2.0\\;Success', $twice);
     }
 }
