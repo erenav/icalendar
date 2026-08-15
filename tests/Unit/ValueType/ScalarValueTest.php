@@ -45,6 +45,24 @@ final class ScalarValueTest extends TestCase
         IntegerValue::parse('5.5');
     }
 
+    public function test_integer_enforces_rfc_signed_32_bit_range_without_overflow(): void
+    {
+        $this->assertSame(2147483647, IntegerValue::parse('+2147483647')->value);
+        $this->assertSame(-2147483648, IntegerValue::parse('-2147483648')->value);
+
+        foreach (['2147483648', '-2147483649', '999999999999999999999999999'] as $invalid) {
+            try {
+                IntegerValue::parse($invalid);
+                $this->fail(sprintf('Expected "%s" to be rejected.', $invalid));
+            } catch (InvalidValueException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+
+        $this->expectException(InvalidValueException::class);
+        new IntegerValue(2147483648);
+    }
+
     public function test_boolean_round_trips(): void
     {
         $this->assertTrue(BooleanValue::parse('TRUE')->value);
@@ -62,6 +80,12 @@ final class ScalarValueTest extends TestCase
     {
         $this->expectException(InvalidValueException::class);
         new UriValue('example.com/no-scheme');
+    }
+
+    public function test_uri_rejects_content_line_injection(): void
+    {
+        $this->expectException(InvalidValueException::class);
+        new UriValue("https://example.test/a\r\nX-INJECTED:yes");
     }
 
     public function test_binary_round_trips_through_base64(): void

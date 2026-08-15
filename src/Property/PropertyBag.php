@@ -13,8 +13,9 @@ use Traversable;
  * An immutable, ordered list of a component's properties.
  *
  * Unlike a map, it preserves both insertion order and duplicate names (multiple
- * ATTENDEE properties, repeated unmodelled `X-` properties). That faithful
- * ordering is precisely what makes the Level-1 round-trip lossless.
+ * ATTENDEE properties, repeated unmodelled `X-` properties). That ordering
+ * enables stable canonical re-export and semantic preservation of supported
+ * unknown properties.
  *
  * @implements IteratorAggregate<int, Property>
  */

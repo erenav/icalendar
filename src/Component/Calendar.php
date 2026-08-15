@@ -11,6 +11,7 @@ use Erenav\ICalendar\Recurrence\OccurrenceExpander;
 use Erenav\ICalendar\Scheduling\Method;
 use Erenav\ICalendar\TimeZone\TimeZoneGenerator;
 use Erenav\ICalendar\ValueType\DateTimeValue;
+use Erenav\ICalendar\ValueType\Period;
 use Erenav\ICalendar\ValueType\TextValue;
 
 /**
@@ -52,6 +53,11 @@ final readonly class Calendar extends Component
         return $this->stringOf('CALSCALE');
     }
 
+    public function name(): ?string
+    {
+        return $this->stringOf('NAME');
+    }
+
     public function method(): ?string
     {
         return $this->stringOf('METHOD');
@@ -64,7 +70,7 @@ final readonly class Calendar extends Component
 
         return match (true) {
             $value instanceof Method => $value,
-            $value instanceof TextValue => Method::tryFrom($value->text),
+            $value instanceof TextValue => Method::tryFrom(strtoupper($value->text)),
             default => null,
         };
     }
@@ -88,10 +94,9 @@ final readonly class Calendar extends Component
     }
 
     /**
-     * Return a copy with a generated VTIMEZONE prepended for each IANA time zone
-     * referenced by an event but not already defined, making the calendar
-     * self-contained. Non-IANA (custom) zone ids are skipped — bring your own
-     * VTIMEZONE for those.
+     * Return a copy with a generated VTIMEZONE prepended for each referenced
+     * IANA zone not already defined. The default generator models known rule
+     * eras over 1970–2100; pass a configured generator for another horizon.
      */
     public function withTimeZones(?TimeZoneGenerator $generator = null): self
     {
@@ -134,6 +139,9 @@ final readonly class Calendar extends Component
             foreach ($property->values as $value) {
                 if ($value instanceof DateTimeValue && $value->tzid !== null) {
                     $tzids[$value->tzid] = true;
+                }
+                if ($value instanceof Period && $value->start->tzid !== null) {
+                    $tzids[$value->start->tzid] = true;
                 }
             }
         }

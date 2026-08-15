@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Erenav\ICalendar\ValueType;
 
 /**
- * A verbatim, unmodelled property value preserved exactly as parsed (after line
- * unfolding, before any value-type interpretation). This is the Level-1
- * round-trip seam: properties the library doesn't model keep their value here,
- * and the serializer emits it without re-escaping so nothing is lost or altered.
+ * An unmodelled property value retained after line unfolding and before any
+ * value-type interpretation. The serializer emits the logical raw value without
+ * value-level re-escaping; content-line folding and surrounding syntax may be
+ * canonicalized.
  */
 final readonly class RawValue implements Value
 {

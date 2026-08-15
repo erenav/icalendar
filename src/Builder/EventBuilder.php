@@ -8,19 +8,23 @@ use DateInterval;
 use DateTimeInterface;
 use Erenav\ICalendar\Component\Alarm;
 use Erenav\ICalendar\Component\Event;
+use Erenav\ICalendar\Exception\InvalidValueException;
 use Erenav\ICalendar\Parameter\CuType;
 use Erenav\ICalendar\Parameter\ParameterBag;
 use Erenav\ICalendar\Parameter\PartStat;
+use Erenav\ICalendar\Parameter\Range;
 use Erenav\ICalendar\Parameter\RawParameter;
 use Erenav\ICalendar\Parameter\Role;
 use Erenav\ICalendar\Property\Classification;
 use Erenav\ICalendar\Property\EventStatus;
+use Erenav\ICalendar\Property\Property;
 use Erenav\ICalendar\Property\Transparency;
 use Erenav\ICalendar\Recurrence\Recurrence;
 use Erenav\ICalendar\ValueType\DateTimeValue;
 use Erenav\ICalendar\ValueType\Duration;
 use Erenav\ICalendar\ValueType\GeoValue;
 use Erenav\ICalendar\ValueType\IntegerValue;
+use Erenav\ICalendar\ValueType\Period;
 use Erenav\ICalendar\ValueType\TextValue;
 use Erenav\ICalendar\ValueType\UriValue;
 
@@ -44,6 +48,12 @@ final class EventBuilder extends Builder
         $this->set('UID', new TextValue($uid));
 
         return $this;
+    }
+
+    /** Copy a complete UID property, including IANA and experimental parameters. */
+    public function uidProperty(Property $property): static
+    {
+        return $this->replaceCompleteProperty('UID', $property);
     }
 
     public function summary(string $summary): static
@@ -79,6 +89,12 @@ final class EventBuilder extends Builder
         $this->set('DTSTART', $this->toDateTimeValue($start));
 
         return $this;
+    }
+
+    /** Copy a complete DTSTART property, retaining VALUE, TZID, and extensions. */
+    public function startProperty(Property $property): static
+    {
+        return $this->replaceCompleteProperty('DTSTART', $property);
     }
 
     /** Sets DTEND, clearing any DURATION (the two are mutually exclusive). */
@@ -150,6 +166,10 @@ final class EventBuilder extends Builder
 
     public function sequence(int $sequence): static
     {
+        if ($sequence < 0) {
+            throw new InvalidValueException('SEQUENCE must be a non-negative integer.');
+        }
+
         $this->set('SEQUENCE', new IntegerValue($sequence));
 
         return $this;
@@ -190,7 +210,7 @@ final class EventBuilder extends Builder
             $parameters = $parameters->with(new RawParameter('CN', $name));
         }
         if ($sentBy !== null) {
-            $parameters = $parameters->with(new RawParameter('SENT-BY', $sentBy));
+            $parameters = $parameters->with(new RawParameter('SENT-BY', $this->toCalAddress($sentBy)->toString()));
         }
 
         $this->set('ORGANIZER', $this->toCalAddress($address), $parameters);
@@ -206,6 +226,13 @@ final class EventBuilder extends Builder
         ?bool $rsvp = null,
         ?string $name = null,
     ): static {
+        if (in_array($partStat, [PartStat::Completed, PartStat::InProcess], true)) {
+            throw new InvalidValueException(sprintf(
+                'PARTSTAT=%s is valid for VTODO but not VEVENT.',
+                $partStat->value,
+            ));
+        }
+
         $parameters = new ParameterBag;
         if ($name !== null) {
             $parameters = $parameters->with(new RawParameter('CN', $name));
@@ -236,11 +263,41 @@ final class EventBuilder extends Builder
     }
 
     /** Mark this event as an override of one instance of a recurring series. */
-    public function recurrenceId(DateTimeInterface|DateTimeValue $recurrenceId): static
+    public function recurrenceId(DateTimeInterface|DateTimeValue $recurrenceId, ?Range $range = null): static
     {
-        $this->set('RECURRENCE-ID', $this->toDateTimeValue($recurrenceId));
+        $parameters = $range !== null ? new ParameterBag($range) : null;
+        $this->set('RECURRENCE-ID', $this->toDateTimeValue($recurrenceId), $parameters);
 
         return $this;
+    }
+
+    /** Copy a complete RECURRENCE-ID property, including RANGE and extensions. */
+    public function recurrenceIdProperty(Property $property): static
+    {
+        return $this->replaceCompleteProperty('RECURRENCE-ID', $property);
+    }
+
+    /** Copy a complete organizer property, including scheduling parameters. */
+    public function organizerProperty(Property $property): static
+    {
+        return $this->replaceCompleteProperty('ORGANIZER', $property);
+    }
+
+    /** Append a complete attendee property without a positional parameter API. */
+    public function attendeeProperty(Property $property): static
+    {
+        if ($property->name !== 'ATTENDEE') {
+            throw new \InvalidArgumentException('Expected an ATTENDEE property.');
+        }
+        $this->properties[] = $property;
+
+        return $this;
+    }
+
+    /** Copy a complete SEQUENCE property. */
+    public function sequenceProperty(Property $property): static
+    {
+        return $this->replaceCompleteProperty('SEQUENCE', $property);
     }
 
     public function addExceptionDate(DateTimeInterface|DateTimeValue ...$dates): static
@@ -249,7 +306,7 @@ final class EventBuilder extends Builder
             return $this;
         }
 
-        $this->append('EXDATE', array_values(array_map(fn ($d): DateTimeValue => $this->toDateTimeValue($d), $dates)));
+        $this->appendDateList('EXDATE', array_values($dates));
 
         return $this;
     }
@@ -260,7 +317,19 @@ final class EventBuilder extends Builder
             return $this;
         }
 
-        $this->append('RDATE', array_values(array_map(fn ($d): DateTimeValue => $this->toDateTimeValue($d), $dates)));
+        $this->appendDateList('RDATE', array_values($dates));
+
+        return $this;
+    }
+
+    /** Append PERIOD-valued recurrence dates without mixing RDATE value types. */
+    public function addRecurrencePeriod(Period ...$periods): static
+    {
+        foreach ($periods as $period) {
+            // One property per period keeps each VALUE/TZID parameter derived
+            // from the period itself even when callers add different zones.
+            $this->append('RDATE', $period);
+        }
 
         return $this;
     }
@@ -275,5 +344,52 @@ final class EventBuilder extends Builder
     public function get(): Event
     {
         return new Event($this->propertyBag(), $this->componentList());
+    }
+
+    private function replaceCompleteProperty(string $expectedName, Property $property): static
+    {
+        if ($property->name !== $expectedName) {
+            throw new \InvalidArgumentException("Expected a {$expectedName} property.");
+        }
+
+        $this->removeProperty($expectedName);
+        $this->properties[] = $property;
+
+        return $this;
+    }
+
+    /**
+     * One TZID and VALUE parameter applies to every value on a content line.
+     * Keep compatible adjacent values together while splitting heterogeneous
+     * lists into independently serializable properties without reordering them.
+     *
+     * @param  list<DateTimeInterface|DateTimeValue>  $dates
+     */
+    private function appendDateList(string $name, array $dates): void
+    {
+        $group = [];
+        $signature = null;
+
+        foreach ($dates as $date) {
+            $value = $this->toDateTimeValue($date);
+            $valueSignature = match (true) {
+                $value->isDateOnly => 'DATE',
+                $value->isUtc => 'UTC',
+                $value->isFloating() => 'FLOATING',
+                default => 'TZID:'.$value->tzid,
+            };
+
+            if ($signature !== null && $valueSignature !== $signature) {
+                $this->append($name, $group);
+                $group = [];
+            }
+
+            $signature = $valueSignature;
+            $group[] = $value;
+        }
+
+        if ($group !== []) {
+            $this->append($name, $group);
+        }
     }
 }

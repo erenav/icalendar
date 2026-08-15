@@ -45,4 +45,21 @@ final class CalAddressTest extends TestCase
     {
         $this->assertTrue(CalAddress::fromEmail('a@b.com')->equals(CalAddress::fromUri('mailto:a@b.com')));
     }
+
+    public function test_rejects_content_line_injection(): void
+    {
+        foreach ([
+            "victim@example.test\r\nATTENDEE:mailto:injected@example.test",
+            "mailto:victim@example.test\nATTENDEE:mailto:injected@example.test",
+        ] as $address) {
+            try {
+                str_starts_with($address, 'mailto:')
+                    ? CalAddress::fromUri($address)
+                    : CalAddress::fromEmail($address);
+                $this->fail('Expected a calendar-address line break to be rejected.');
+            } catch (InvalidValueException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
 }

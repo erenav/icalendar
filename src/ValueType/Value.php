@@ -10,8 +10,8 @@ namespace Erenav\ICalendar\ValueType;
  * property-value enums (EventStatus, Transparency, …).
  *
  * `toString()` returns the *logical* value; wire-level escaping (for TEXT) and
- * folding are applied by the serializer, except for {@see RawValue}, which is
- * emitted verbatim to preserve unmodelled input (Level-1 round-trip).
+ * folding are applied by the serializer, except for {@see RawValue}, whose
+ * logical value is emitted without value-level re-escaping.
  *
  * Note: this interface intentionally does not extend Stringable — enums cannot
  * declare __toString, and they need to implement Value.

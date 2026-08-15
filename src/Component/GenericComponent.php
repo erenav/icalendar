@@ -10,10 +10,9 @@ use Erenav\ICalendar\ValueType\RawValue;
 
 /**
  * A component the library does not yet model with a dedicated type (VTODO,
- * VJOURNAL, VFREEBUSY, VTIMEZONE, or an experimental X-component). It preserves
- * its name, properties and children verbatim so the Level-1 round-trip stays
- * lossless — the component-level counterpart of
- * {@see RawValue}.
+ * VJOURNAL, VFREEBUSY, or an experimental X-component). It retains the
+ * component tree for canonical semantic re-export — the component-level
+ * counterpart of {@see RawValue}. Original casing and byte layout are not kept.
  */
 final readonly class GenericComponent extends Component
 {

@@ -41,6 +41,20 @@ final readonly class Duration implements Value
         if ($weeks > 0 && ($days > 0 || $hours > 0 || $minutes > 0 || $seconds > 0)) {
             throw new InvalidValueException('An RFC 5545 DURATION week form cannot be combined with days or time components.');
         }
+
+        $total = 0;
+        foreach ([
+            'weeks' => [$weeks, self::SECONDS_PER_WEEK],
+            'days' => [$days, self::SECONDS_PER_DAY],
+            'hours' => [$hours, 3600],
+            'minutes' => [$minutes, 60],
+            'seconds' => [$seconds, 1],
+        ] as $name => [$value, $multiplier]) {
+            if ($value > intdiv(PHP_INT_MAX - $total, $multiplier)) {
+                throw new InvalidValueException(sprintf('Duration %s exceed the supported integer duration range.', $name));
+            }
+            $total += $value * $multiplier;
+        }
     }
 
     public static function of(
@@ -56,27 +70,27 @@ final readonly class Duration implements Value
 
     public static function weeks(int $weeks): self
     {
-        return new self($weeks < 0, abs($weeks), 0, 0, 0, 0);
+        return new self($weeks < 0, self::magnitude($weeks), 0, 0, 0, 0);
     }
 
     public static function days(int $days): self
     {
-        return new self($days < 0, 0, abs($days), 0, 0, 0);
+        return new self($days < 0, 0, self::magnitude($days), 0, 0, 0);
     }
 
     public static function hours(int $hours): self
     {
-        return new self($hours < 0, 0, 0, abs($hours), 0, 0);
+        return new self($hours < 0, 0, 0, self::magnitude($hours), 0, 0);
     }
 
     public static function minutes(int $minutes): self
     {
-        return new self($minutes < 0, 0, 0, 0, abs($minutes), 0);
+        return new self($minutes < 0, 0, 0, 0, self::magnitude($minutes), 0);
     }
 
     public static function seconds(int $seconds): self
     {
-        return new self($seconds < 0, 0, 0, 0, 0, abs($seconds));
+        return new self($seconds < 0, 0, 0, 0, 0, self::magnitude($seconds));
     }
 
     public static function zero(): self
@@ -95,13 +109,15 @@ final readonly class Duration implements Value
             throw new InvalidValueException(sprintf('Malformed DURATION value "%s".', $value));
         }
 
-        $weeks = (int) ($m['weeks'] ?? 0);
-        $days = (int) ($m['days'] ?? 0);
-        $hours = (int) ($m['hours'] ?? 0);
-        $minutes = (int) ($m['minutes'] ?? 0);
-        $seconds = (int) ($m['seconds'] ?? 0);
+        $weeks = self::component($m['weeks'] ?? '');
+        $days = self::component($m['days'] ?? '');
+        $hours = self::component($m['hours'] ?? '');
+        $minutes = self::component($m['minutes'] ?? '');
+        $seconds = self::component($m['seconds'] ?? '');
 
-        if ($weeks === 0 && $days === 0 && $hours === 0 && $minutes === 0 && $seconds === 0) {
+        $hasComponent = ($m['weeks'] ?? '') !== '' || ($m['days'] ?? '') !== ''
+            || ($m['hours'] ?? '') !== '' || ($m['minutes'] ?? '') !== '' || ($m['seconds'] ?? '') !== '';
+        if (! $hasComponent) {
             throw new InvalidValueException(sprintf('DURATION value "%s" has no components.', $value));
         }
 
@@ -208,5 +224,31 @@ final readonly class Duration implements Value
     public function equals(self $other): bool
     {
         return $this->toSeconds() === $other->toSeconds();
+    }
+
+    private static function magnitude(int $value): int
+    {
+        if ($value === PHP_INT_MIN) {
+            throw new InvalidValueException('The signed duration magnitude exceeds the supported integer range.');
+        }
+
+        return abs($value);
+    }
+
+    private static function component(string $digits): int
+    {
+        if ($digits === '') {
+            return 0;
+        }
+
+        $normalized = ltrim($digits, '0');
+        $normalized = $normalized === '' ? '0' : $normalized;
+        $limit = (string) PHP_INT_MAX;
+        if (strlen($normalized) > strlen($limit)
+            || (strlen($normalized) === strlen($limit) && strcmp($normalized, $limit) > 0)) {
+            throw new InvalidValueException(sprintf('Duration component "%s" exceeds the supported integer range.', $digits));
+        }
+
+        return (int) $digits;
     }
 }

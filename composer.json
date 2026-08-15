@@ -36,7 +36,7 @@
     },
     "scripts": {
         "test": "phpunit",
-        "analyse": "phpstan analyse",
+        "analyse": "phpstan analyse --memory-limit=512M",
         "format": "pint",
         "lint": "pint --test",
         "check": [

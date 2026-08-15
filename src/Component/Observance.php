@@ -64,4 +64,19 @@ final readonly class Observance extends Component
 
         return $value instanceof Recurrence ? $value : null;
     }
+
+    /** @return list<DateTimeValue> Additional local transition onsets. */
+    public function recurrenceDates(): array
+    {
+        $dates = [];
+        foreach ($this->properties->all('RDATE') as $property) {
+            foreach ($property->values as $value) {
+                if ($value instanceof DateTimeValue) {
+                    $dates[] = $value;
+                }
+            }
+        }
+
+        return $dates;
+    }
 }

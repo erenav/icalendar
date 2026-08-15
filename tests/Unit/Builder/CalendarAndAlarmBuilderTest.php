@@ -32,6 +32,11 @@ final class CalendarAndAlarmBuilderTest extends TestCase
         $this->assertSame('1.0', Calendar::build()->version('1.0')->get()->version());
     }
 
+    public function test_calendar_name_has_matching_read_api(): void
+    {
+        $this->assertSame('Team calendar', Calendar::build()->name('Team calendar')->get()->name());
+    }
+
     public function test_alarm_builder_relative_trigger(): void
     {
         $alarm = Alarm::build()

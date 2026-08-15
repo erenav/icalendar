@@ -9,10 +9,13 @@ use DateTime;
 use DateTimeImmutable;
 use DateTimeZone;
 use Erenav\ICalendar\Component\Event;
+use Erenav\ICalendar\Exception\InvalidValueException;
 use Erenav\ICalendar\Parameter\PartStat;
 use Erenav\ICalendar\Parameter\Role;
 use Erenav\ICalendar\Property\EventStatus;
+use Erenav\ICalendar\ValueType\DateTimeValue;
 use Erenav\ICalendar\ValueType\Duration;
+use Erenav\ICalendar\ValueType\Period;
 use PHPUnit\Framework\TestCase;
 
 final class EventBuilderTest extends TestCase
@@ -92,6 +95,18 @@ final class EventBuilderTest extends TestCase
         $this->assertSame(PartStat::Accepted, $bob->participationStatus());
     }
 
+    public function test_add_attendee_rejects_vtodo_only_participation_states(): void
+    {
+        foreach ([PartStat::Completed, PartStat::InProcess] as $status) {
+            try {
+                Event::build()->addAttendee('alice@app.test', partStat: $status);
+                $this->fail("Expected {$status->value} to be rejected for VEVENT.");
+            } catch (InvalidValueException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
     public function test_organizer_with_common_name(): void
     {
         $event = Event::build()->organizer('boss@app.test', name: 'The Boss')->get();
@@ -107,11 +122,76 @@ final class EventBuilderTest extends TestCase
         $this->assertSame('https://dir.test/u/1', $event->organizer()?->address()->toString());
     }
 
+    public function test_organizer_normalizes_sent_by_as_a_calendar_address(): void
+    {
+        $organizer = Event::build()
+            ->organizer('boss@app.test', sentBy: 'assistant@app.test')
+            ->get()
+            ->organizer();
+
+        $this->assertSame('mailto:assistant@app.test', $organizer?->sentBy());
+        $this->assertSame('mailto:assistant@app.test', $organizer?->sentByAddress()?->toString());
+    }
+
+    public function test_sequence_rejects_negative_values(): void
+    {
+        $this->expectException(InvalidValueException::class);
+
+        Event::build()->sequence(-1);
+    }
+
     public function test_categories_replace_and_clear(): void
     {
         $this->assertSame(['work', 'planning'], Event::build()->categories('work', 'planning')->get()->categories());
         $this->assertSame(['x'], Event::build()->categories('work')->categories('x')->get()->categories());
         $this->assertSame([], Event::build()->categories('work')->categories()->get()->categories());
+    }
+
+    public function test_color_has_matching_read_api(): void
+    {
+        $this->assertSame('blue', Event::build()->color('blue')->get()->color());
+    }
+
+    public function test_add_recurrence_period_keeps_each_period_parameter_context_separate(): void
+    {
+        $utc = Period::lasting(
+            DateTimeValue::utc(new DateTimeImmutable('2026-07-01 10:00:00Z')),
+            Duration::hours(1),
+        );
+        $zoned = Period::lasting(
+            DateTimeValue::zoned(new DateTimeImmutable('2026-07-02 10:00:00', new DateTimeZone('America/New_York')), 'America/New_York'),
+            Duration::hours(2),
+        );
+        $event = Event::build()->addRecurrencePeriod($utc, $zoned)->get();
+
+        $this->assertSame([$utc, $zoned], $event->recurrenceDatePeriods());
+        $this->assertCount(2, $event->properties->all('RDATE'));
+    }
+
+    public function test_recurrence_date_builders_split_parameter_incompatible_values_without_reordering(): void
+    {
+        $newYorkOne = DateTimeValue::zoned(new DateTimeImmutable('2026-07-01 09:00:00'), 'America/New_York');
+        $newYorkTwo = DateTimeValue::zoned(new DateTimeImmutable('2026-07-02 09:00:00'), 'America/New_York');
+        $losAngeles = DateTimeValue::zoned(new DateTimeImmutable('2026-07-03 09:00:00'), 'America/Los_Angeles');
+        $utc = DateTimeValue::utc(new DateTimeImmutable('2026-07-04 09:00:00Z'));
+        $date = DateTimeValue::date(new DateTimeImmutable('2026-07-05'));
+
+        $event = Event::build()
+            ->addRecurrenceDate($newYorkOne, $newYorkTwo, $losAngeles, $utc, $date)
+            ->addExceptionDate($newYorkOne, $losAngeles)
+            ->get();
+
+        $rdates = $event->properties->all('RDATE');
+        $this->assertCount(4, $rdates);
+        $this->assertSame([$newYorkOne, $newYorkTwo], $rdates[0]->values);
+        $this->assertSame([$losAngeles], $rdates[1]->values);
+        $this->assertSame([$utc], $rdates[2]->values);
+        $this->assertSame([$date], $rdates[3]->values);
+
+        $exdates = $event->properties->all('EXDATE');
+        $this->assertCount(2, $exdates);
+        $this->assertSame([$newYorkOne], $exdates[0]->values);
+        $this->assertSame([$losAngeles], $exdates[1]->values);
     }
 
     public function test_property_escape_hatch_appends(): void
