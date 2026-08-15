@@ -6,6 +6,8 @@ All notable changes to `erenav/icalendar` are documented here. The format is bas
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-15
+
 ### Added
 - Ordered `RecurrencePart` support for semantically preserving unknown RRULE segments,
   numeric/contextual BY-part validation, and explicit `UnsupportedRecurrenceException`
